@@ -1374,15 +1374,32 @@ def worker_add(plan_dir: Path, world: World, wid: str, engine: str, session: str
     return f"worker {wid} ({engine}) registered; liveness from {proofs or 'reports only'}"
 
 
-_REGENERABLE = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis",
-                "node_modules", ".venv", "venv", ".tox", ".nox", ".zamu", ".DS_Store"}
+#: Directories whose every file a tool wrote: nobody puts work in them by hand.
+_CACHES = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis", ".zamu"}
+#: Environments a tool builds, which hold its files only below a known top-level layout. A
+#: file a person dropped at their top (`venv/notes.md`) is not regenerable, whatever the name.
+_ENVS = {".venv": {"bin", "lib", "lib64", "include", "share", "Scripts", "Lib", "Include",
+                   "pyvenv.cfg", ".gitignore", "CACHEDIR.TAG"},
+         "venv": {"bin", "lib", "lib64", "include", "share", "Scripts", "Lib", "Include",
+                  "pyvenv.cfg", ".gitignore", "CACHEDIR.TAG"},
+         "node_modules": None, ".tox": None, ".nox": None}
 
 
 def _regenerable(path: str) -> bool:
     """An ignored path that a build or zamu itself recreates, so losing it costs nothing."""
     parts = [x for x in path.rstrip("/").split("/") if x]
-    return (any(x in _REGENERABLE or x.endswith(".egg-info") for x in parts)
-            or path.endswith((".pyc", ".pyo")))
+    if path.endswith((".pyc", ".pyo")) or any(x in _CACHES or x.endswith(".egg-info")
+                                                for x in parts[:-1]):
+        return True
+    for i, x in enumerate(parts[:-1]):
+        if x in _ENVS:
+            layout = _ENVS[x]
+            below = parts[i + 1]
+            if layout is None:
+                # node_modules/<pkg>/..., .tox/<env>/...: a file directly in the top is a stray.
+                return len(parts) - i > 2
+            return below in layout
+    return parts[-1] == ".DS_Store"
 
 
 def worker_retire(plan: Plan, plan_dir: Path, world: World, wid: str) -> str:
@@ -1453,8 +1470,27 @@ def worker_retire(plan: Plan, plan_dir: Path, world: World, wid: str) -> str:
                 if sid in live:
                     raise EngineError(f"worker {wid}'s session {sid[:8]} is still running; end it, or "
                                       "move it out of the worktree, before retiring.")
-            inside = [p for p in (world.scan() or [])
-                      if procs_mod.under(p.path, str(Path(tree).resolve()))]
+        if tree and Path(tree).exists():
+            # Any process working in the tree loses its floor when the tree goes, except the
+            # proven window's own, which closing the window ends anyway. An unreadable process
+            # table proves nothing, so it refuses rather than reading as "nobody there".
+            table = world.scan()
+            if table is None:
+                raise EngineError(f"cannot read the process table to check that nothing works "
+                                  f"inside worker {wid}'s worktree; not removing it.")
+            spared: set[int] = set()
+            root = world.pane_pid(pane) if owned is True else None
+            if root is not None:
+                spared.add(root)
+                grew = True
+                while grew:
+                    grew = False
+                    for p in table:
+                        if p.ppid in spared and p.pid not in spared:
+                            spared.add(p.pid)
+                            grew = True
+            inside = [p for p in table if p.pid not in spared
+                      and procs_mod.under(p.path, str(Path(tree).resolve()))]
             if inside:
                 pids = ", ".join(f"{p.pid} ({p.cmd.split()[0] if p.cmd else '?'})" for p in inside[:5])
                 raise EngineError(f"processes are working inside worker {wid}'s worktree: {pids}; "

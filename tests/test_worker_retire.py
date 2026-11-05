@@ -59,7 +59,7 @@ def test_failed_list_panes_leaves_liveness_unknown(tmp_path, monkeypatch):
 def test_gone_pane_is_dead_and_can_be_retired_without_kill(tmp_path, monkeypatch):
     plan, repo, tree = setup_worker(tmp_path)
     fake_empty_display(tmp_path, monkeypatch, panes="%8\n")
-    world = engine.World(now=lambda: NOW, pane_exists=cli._pane_exists,
+    world = engine.World(scan=lambda: [], now=lambda: NOW, pane_exists=cli._pane_exists,
                          pane_has_session=cli._pane_has_session)
     engine.refresh_idle_workers(plan, tmp_path, world)
     assert store.read(tmp_path)["workers"]["cx"]["worker"] == "dead"
@@ -70,7 +70,7 @@ def test_gone_pane_is_dead_and_can_be_retired_without_kill(tmp_path, monkeypatch
         calls.append(list(argv))
         return engine.launch_mod.default_run(argv)
 
-    retire_world = engine.World(now=lambda: NOW, run=run, pane_exists=cli._pane_exists,
+    retire_world = engine.World(scan=lambda: [], now=lambda: NOW, run=run, pane_exists=cli._pane_exists,
                                 pane_has_session=cli._pane_has_session)
     assert "retired" in engine.worker_retire(plan, tmp_path, retire_world, "cx")
     assert not tree.exists()
@@ -87,7 +87,7 @@ def test_present_hand_started_pane_is_live_but_cannot_be_killed(tmp_path, monkey
             pytest.fail("retirement attempted to kill an unowned pane")
         return engine.launch_mod.default_run(argv)
 
-    world = engine.World(now=lambda: NOW, run=run, pane_exists=cli._pane_exists,
+    world = engine.World(scan=lambda: [], now=lambda: NOW, run=run, pane_exists=cli._pane_exists,
                          pane_has_session=cli._pane_has_session)
     engine.refresh_idle_workers(plan, tmp_path, world)
     assert store.read(tmp_path)["workers"]["cx"]["worker"] == "live"
@@ -107,7 +107,7 @@ def setup_worker(tmp_path: Path):
     git("-C", str(repo), "worktree", "add", "-q", "-b", "a", str(tree))
     (tree / ".zamu").mkdir()
     (tree / ".zamu" / ".gitignore").write_text("*\n")
-    world = engine.World(now=lambda: NOW, pane_exists=lambda pane: True)
+    world = engine.World(scan=lambda: [], now=lambda: NOW, pane_exists=lambda pane: True)
     engine.worker_add(tmp_path, world, "cx", "codex", pane="%9", worktree=str(tree))
     engine.assign(plan, tmp_path, world, "a", "cx")
     engine.mark(plan, tmp_path, world, "a", "done", "merged")
@@ -116,7 +116,7 @@ def setup_worker(tmp_path: Path):
 
 def test_finished_worker_with_dead_pane_is_not_assignable(tmp_path):
     plan, _, _ = setup_worker(tmp_path)
-    dead = engine.World(now=lambda: NOW + dt.timedelta(hours=1), pane_exists=lambda pane: False)
+    dead = engine.World(scan=lambda: [], now=lambda: NOW + dt.timedelta(hours=1), pane_exists=lambda pane: False)
     engine.pulse(plan, tmp_path, Config(), dead)
     doc = store.read(tmp_path)
     assert doc["workers"]["cx"]["worker"] == "dead"
@@ -127,16 +127,16 @@ def test_finished_worker_with_dead_pane_is_not_assignable(tmp_path):
 
 def test_assign_checks_proof_even_before_another_pulse(tmp_path):
     plan, _, _ = setup_worker(tmp_path)
-    dead = engine.World(now=lambda: NOW, pane_exists=lambda pane: False)
+    dead = engine.World(scan=lambda: [], now=lambda: NOW, pane_exists=lambda pane: False)
     with pytest.raises(engine.EngineError, match="dead"):
         engine.assign(plan, tmp_path, dead, "b", "cx")
 
 
 def test_unreadable_proof_does_not_restore_a_dead_worker(tmp_path):
     plan, _, _ = setup_worker(tmp_path)
-    dead = engine.World(now=lambda: NOW, pane_exists=lambda pane: False)
+    dead = engine.World(scan=lambda: [], now=lambda: NOW, pane_exists=lambda pane: False)
     engine.refresh_idle_workers(plan, tmp_path, dead)
-    unknown = engine.World(now=lambda: NOW, pane_exists=lambda pane: None)
+    unknown = engine.World(scan=lambda: [], now=lambda: NOW, pane_exists=lambda pane: None)
     engine.refresh_idle_workers(plan, tmp_path, unknown)
     doc = store.read(tmp_path)
     assert doc["workers"]["cx"]["worker"] == "dead"
@@ -145,10 +145,10 @@ def test_unreadable_proof_does_not_restore_a_dead_worker(tmp_path):
 
 def test_unreadable_proof_removes_a_live_worker_from_assignable_list(tmp_path):
     plan, _, _ = setup_worker(tmp_path)
-    live = engine.World(now=lambda: NOW, pane_exists=lambda pane: True)
+    live = engine.World(scan=lambda: [], now=lambda: NOW, pane_exists=lambda pane: True)
     engine.refresh_idle_workers(plan, tmp_path, live)
     assert render.summary(plan, store.read(tmp_path), Config(), NOW)["idle_workers"] == ["cx (codex)"]
-    unknown = engine.World(now=lambda: NOW, pane_exists=lambda pane: None)
+    unknown = engine.World(scan=lambda: [], now=lambda: NOW, pane_exists=lambda pane: None)
     engine.refresh_idle_workers(plan, tmp_path, unknown)
     doc = store.read(tmp_path)
     assert doc["workers"]["cx"]["worker"] == "unknown"
@@ -163,7 +163,7 @@ def test_launched_workers_token_must_remain_in_its_pane(tmp_path):
     with store.transaction(tmp_path) as doc:
         doc["workers"]["cx"].update({"ours": True, "token": "launch-id"})
     seen = []
-    world = engine.World(now=lambda: NOW,
+    world = engine.World(scan=lambda: [], now=lambda: NOW,
                          pane_has_session=lambda pane, token: seen.append(token) or False)
     engine.refresh_idle_workers(plan, tmp_path, world)
     assert seen == ["launch-id"]
@@ -183,7 +183,7 @@ def test_retire_closes_window_removes_clean_tree_and_keeps_branch(tmp_path):
             return 0, "", ""
         return engine.launch_mod.default_run(argv)
 
-    world = engine.World(now=lambda: NOW, run=run,
+    world = engine.World(scan=lambda: [], now=lambda: NOW, run=run,
                          pane_has_session=lambda pane, token: proofs.append((pane, token)) or True)
     assert "retired" in engine.worker_retire(plan, tmp_path, world, "cx")
     assert not tree.exists()
@@ -209,7 +209,7 @@ def test_retire_refuses_to_kill_a_reused_pane(tmp_path):
     def pane_has_session(pane, token):
         return token == ""  # pane exists, but another process replaced our worker token
 
-    world = engine.World(now=lambda: NOW, run=run, pane_exists=lambda pane: True,
+    world = engine.World(scan=lambda: [], now=lambda: NOW, run=run, pane_exists=lambda pane: True,
                          pane_has_session=pane_has_session)
     with pytest.raises(engine.EngineError, match="cannot prove"):
         engine.worker_retire(plan, tmp_path, world, "cx")
@@ -219,7 +219,7 @@ def test_retire_refuses_to_kill_a_reused_pane(tmp_path):
 
 def test_retire_refuses_a_live_hand_started_pane_without_identity(tmp_path):
     plan, _, tree = setup_worker(tmp_path)
-    world = engine.World(now=lambda: NOW, pane_exists=lambda pane: True)
+    world = engine.World(scan=lambda: [], now=lambda: NOW, pane_exists=lambda pane: True)
     with pytest.raises(engine.EngineError, match="cannot prove"):
         engine.worker_retire(plan, tmp_path, world, "cx")
     assert tree.exists()
@@ -235,7 +235,7 @@ def test_retire_can_close_a_pane_with_its_recorded_session_id(tmp_path):
         calls.append(list(argv))
         return (0, "", "") if argv[0] == "tmux" else engine.launch_mod.default_run(argv)
 
-    world = engine.World(now=lambda: NOW, run=run,
+    world = engine.World(scan=lambda: [], now=lambda: NOW, run=run,
                          pane_has_session=lambda pane, identity: identity == "sid-1")
     engine.worker_retire(plan, tmp_path, world, "cx")
     assert not tree.exists()
@@ -250,7 +250,7 @@ def test_retire_skips_kill_when_the_recorded_pane_is_gone(tmp_path):
         calls.append(list(argv))
         return engine.launch_mod.default_run(argv)
 
-    world = engine.World(now=lambda: NOW, run=run, pane_exists=lambda pane: False,
+    world = engine.World(scan=lambda: [], now=lambda: NOW, run=run, pane_exists=lambda pane: False,
                          pane_has_session=lambda pane, identity: False)
     engine.worker_retire(plan, tmp_path, world, "cx")
     assert not tree.exists()
@@ -267,7 +267,7 @@ def test_retire_refuses_dirty_tree_without_killing_window(tmp_path):
         return engine.launch_mod.default_run(argv)
 
     with pytest.raises(engine.EngineError, match="dirty"):
-        engine.worker_retire(plan, tmp_path, engine.World(now=lambda: NOW, run=run), "cx")
+        engine.worker_retire(plan, tmp_path, engine.World(scan=lambda: [], now=lambda: NOW, run=run), "cx")
     assert tree.exists()
     assert not any(c[0] == "tmux" for c in calls)
     assert store.read(tmp_path)["workers"]["cx"].get("worker") != "retired"
@@ -275,7 +275,7 @@ def test_retire_refuses_dirty_tree_without_killing_window(tmp_path):
 
 def test_retire_refuses_active_worker(tmp_path):
     plan, _, _ = setup_worker(tmp_path)
-    world = engine.World(now=lambda: NOW, pane_exists=lambda pane: True)
+    world = engine.World(scan=lambda: [], now=lambda: NOW, pane_exists=lambda pane: True)
     engine.assign(plan, tmp_path, world, "b", "cx")
     with pytest.raises(engine.EngineError, match="active"):
         engine.worker_retire(plan, tmp_path, world, "cx")
@@ -292,7 +292,7 @@ def test_retire_never_removes_the_main_checkout(tmp_path):
         return engine.launch_mod.default_run(argv)
 
     with pytest.raises(engine.EngineError, match="main checkout"):
-        engine.worker_retire(plan, tmp_path, engine.World(now=lambda: NOW, run=run), "cx")
+        engine.worker_retire(plan, tmp_path, engine.World(scan=lambda: [], now=lambda: NOW, run=run), "cx")
     assert repo.exists()
     assert not any(c[0] == "tmux" for c in calls)
 
@@ -321,7 +321,7 @@ def paneless_session_worker(tmp_path, live):
     plan, repo, tree = setup_worker(tmp_path)
     with store.transaction(tmp_path) as doc:
         doc["workers"]["cx"].update({"pane": "", "session": "sid-pm", "engine": "claude"})
-    return plan, repo, tree, engine.World(now=lambda: NOW, coord=BoardCoord(live))
+    return plan, repo, tree, engine.World(scan=lambda: [], now=lambda: NOW, coord=BoardCoord(live))
 
 
 def test_retire_refuses_while_the_recorded_session_is_live(tmp_path):
@@ -363,7 +363,7 @@ def test_retire_refuses_a_tree_holding_ignored_work(tmp_path):
     (tree / ".ignored").mkdir()
     (tree / ".ignored" / "review-synthesis.md").write_text("ten dollars of review")
     with pytest.raises(engine.EngineError, match="review-synthesis.md"):
-        engine.worker_retire(plan, tmp_path, engine.World(now=lambda: NOW,
+        engine.worker_retire(plan, tmp_path, engine.World(scan=lambda: [], now=lambda: NOW,
                                                           pane_exists=lambda p: False), "cx")
     assert (tree / ".ignored" / "review-synthesis.md").exists()
 
@@ -376,6 +376,62 @@ def test_retire_still_removes_regenerable_caches(tmp_path):
     git("-C", str(tree), "merge", "-q", "--ff-only", "main")
     (tree / "pkg" / "__pycache__").mkdir(parents=True)
     (tree / "pkg" / "__pycache__" / "m.cpython-312.pyc").write_bytes(b"\0")
-    engine.worker_retire(plan, tmp_path, engine.World(now=lambda: NOW,
+    engine.worker_retire(plan, tmp_path, engine.World(scan=lambda: [], now=lambda: NOW,
                                                       pane_exists=lambda p: False), "cx")
     assert not tree.exists()
+
+
+def test_closing_a_proven_pane_does_not_excuse_another_process_in_the_tree(tmp_path):
+    # Hostile p1.1: the pane's own processes die with its window; a stranger's do not.
+    plan, _, tree = setup_worker(tmp_path)
+    with store.transaction(tmp_path) as doc:
+        doc["workers"]["cx"].update({"ours": True, "token": "launch-id"})
+    mine = procs_mod.Proc(pid=500, ppid=400, cwd=str(tree), cpu=0, start=1, cmd="bash")
+    other = procs_mod.Proc(pid=4242, ppid=1, cwd=str(tree), cpu=0, start=1, cmd="pytest")
+    calls = []
+    world = engine.World(now=lambda: NOW, run=lambda a: calls.append(list(a)) or ((0, "", "") if a[0] == "tmux" else engine.launch_mod.default_run(a)),
+                         pane_has_session=lambda p, t: True, pane_pid=lambda p: 400,
+                         scan=lambda: [mine, other])
+    with pytest.raises(engine.EngineError, match="4242"):
+        engine.worker_retire(plan, tmp_path, world, "cx")
+    assert not any(c[0] == "tmux" for c in calls)
+
+
+def test_the_proven_panes_own_processes_do_not_block_retirement(tmp_path):
+    plan, _, tree = setup_worker(tmp_path)
+    with store.transaction(tmp_path) as doc:
+        doc["workers"]["cx"].update({"ours": True, "token": "launch-id"})
+    root = procs_mod.Proc(pid=400, ppid=1, cwd=str(tree), cpu=0, start=1, cmd="bash")
+    kid = procs_mod.Proc(pid=500, ppid=400, cwd=str(tree), cpu=0, start=1, cmd="claude")
+
+    def run(argv):
+        return (0, "", "") if argv[0] == "tmux" else engine.launch_mod.default_run(argv)
+
+    world = engine.World(now=lambda: NOW, run=run, pane_has_session=lambda p, t: True,
+                         pane_pid=lambda p: 400, scan=lambda: [root, kid])
+    engine.worker_retire(plan, tmp_path, world, "cx")
+    assert not tree.exists()
+
+
+def test_an_unreadable_process_table_does_not_prove_the_tree_empty(tmp_path):
+    # Hostile p1.2.
+    plan, _, tree, _ = paneless_session_worker(tmp_path, set())
+    world = engine.World(now=lambda: NOW, coord=BoardCoord(set()), scan=lambda: None)
+    with pytest.raises(engine.EngineError, match="process table"):
+        engine.worker_retire(plan, tmp_path, world, "cx")
+    assert tree.exists()
+
+
+def test_a_hand_placed_file_in_a_venv_is_not_a_cache(tmp_path):
+    # Hostile p1.3: a cache directory's name does not make every file in it regenerable.
+    plan, repo, tree = setup_worker(tmp_path)
+    (repo / ".gitignore").write_text("venv/\n")
+    git("-C", str(repo), "add", ".gitignore")
+    git("-C", str(repo), "commit", "-q", "-m", "ignore")
+    git("-C", str(tree), "merge", "-q", "--ff-only", "main")
+    (tree / "venv" / "lib").mkdir(parents=True)
+    (tree / "venv" / "lib" / "site.py").write_text("")
+    (tree / "venv" / "irreplaceable-review.md").write_text("keep")
+    with pytest.raises(engine.EngineError, match="irreplaceable-review.md"):
+        engine.worker_retire(plan, tmp_path, engine.World(now=lambda: NOW, scan=lambda: [],
+                                                          pane_exists=lambda p: False), "cx")
