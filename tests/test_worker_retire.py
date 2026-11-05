@@ -408,7 +408,8 @@ def test_the_proven_panes_own_processes_do_not_block_retirement(tmp_path):
         return (0, "", "") if argv[0] == "tmux" else engine.launch_mod.default_run(argv)
 
     world = engine.World(now=lambda: NOW, run=run, pane_has_session=lambda p, t: True,
-                         pane_pid=lambda p: 400, scan=lambda: [root, kid])
+                         pane_pid=lambda p: 400, scan=lambda: next(scans))
+    scans = iter([[root, kid], []])  # the window's processes end when it closes
     engine.worker_retire(plan, tmp_path, world, "cx")
     assert not tree.exists()
 
@@ -435,3 +436,23 @@ def test_a_hand_placed_file_in_a_venv_is_not_a_cache(tmp_path):
     with pytest.raises(engine.EngineError, match="irreplaceable-review.md"):
         engine.worker_retire(plan, tmp_path, engine.World(now=lambda: NOW, scan=lambda: [],
                                                           pane_exists=lambda p: False), "cx")
+
+
+def test_a_pane_child_that_outlives_the_window_keeps_the_tree(tmp_path):
+    # Hostile p2.2: a `nohup` child of the pane survives kill-window; check again after it.
+    plan, _, tree = setup_worker(tmp_path)
+    with store.transaction(tmp_path) as doc:
+        doc["workers"]["cx"].update({"ours": True, "token": "launch-id"})
+    root = procs_mod.Proc(pid=400, ppid=1, cwd=str(tree), cpu=0, start=1, cmd="bash")
+    kid = procs_mod.Proc(pid=500, ppid=400, cwd=str(tree), cpu=0, start=1, cmd="pytest")
+    orphan = procs_mod.Proc(pid=500, ppid=1, cwd=str(tree), cpu=0, start=1, cmd="pytest")
+    scans = iter([[root, kid], [orphan]])
+
+    def run(argv):
+        return (0, "", "") if argv[0] == "tmux" else engine.launch_mod.default_run(argv)
+
+    world = engine.World(now=lambda: NOW, run=run, pane_has_session=lambda p, t: True,
+                         pane_pid=lambda p: 400, scan=lambda: next(scans))
+    with pytest.raises(engine.EngineError, match="500"):
+        engine.worker_retire(plan, tmp_path, world, "cx")
+    assert tree.exists()

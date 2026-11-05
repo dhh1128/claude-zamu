@@ -1504,6 +1504,17 @@ def worker_retire(plan: Plan, plan_dir: Path, world: World, wid: str) -> str:
             elif world.pane_exists(pane) is not False:
                 raise EngineError(f"cannot prove pane {pane} still belongs to worker {wid}; "
                                   "close it manually before retiring.")
+        if tree and Path(tree).exists() and window_closed:
+            # A child that ignores hangup outlives its window, so the spared pane processes are
+            # checked again once the window is gone. The window stays closed; the tree stays.
+            table = world.scan()
+            left = [p for p in (table or []) if procs_mod.under(p.path, str(Path(tree).resolve()))]
+            if table is None or left:
+                who = ", ".join(f"{p.pid} ({p.cmd.split()[0] if p.cmd else '?'})" for p in left[:5])
+                raise EngineError(f"closed worker {wid}'s window, but "
+                                  + (f"{who} still works inside its worktree" if left else
+                                     "the process table could not be read afterwards")
+                                  + "; kept the tree. Retire again once that has ended.")
         if tree and Path(tree).exists():
             rc, out, err = run(["git", "-C", main, "worktree", "remove", tree])
             if rc != 0:
