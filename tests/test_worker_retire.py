@@ -295,3 +295,87 @@ def test_retire_never_removes_the_main_checkout(tmp_path):
         engine.worker_retire(plan, tmp_path, engine.World(now=lambda: NOW, run=run), "cx")
     assert repo.exists()
     assert not any(c[0] == "tmux" for c in calls)
+
+
+# ---- 2026-11-05: retire deleted a live session's worktree and its ignored files ----------
+#
+# The PM of plan pr1685-attribs registered itself, by session id and with no pane, as the
+# worker for its own item, in a worktree it had entered. After the item landed it ran
+# `zamu worker retire`, which removed the tree from under the live session: nothing asked
+# whether the recorded session still ran, and "clean" did not count gitignored files, so a
+# keri-review-panel synthesis and its reports in `.ignored/` went with it.
+
+from zamu.coord import Coord
+from zamu import procs as procs_mod
+
+
+class BoardCoord(Coord):
+    def __init__(self, live):
+        self.live = live
+
+    def live_sessions(self, repo):
+        return self.live
+
+
+def paneless_session_worker(tmp_path, live):
+    plan, repo, tree = setup_worker(tmp_path)
+    with store.transaction(tmp_path) as doc:
+        doc["workers"]["cx"].update({"pane": "", "session": "sid-pm", "engine": "claude"})
+    return plan, repo, tree, engine.World(now=lambda: NOW, coord=BoardCoord(live))
+
+
+def test_retire_refuses_while_the_recorded_session_is_live(tmp_path):
+    plan, _, tree, world = paneless_session_worker(tmp_path, {"sid-pm"})
+    with pytest.raises(engine.EngineError, match="still running"):
+        engine.worker_retire(plan, tmp_path, world, "cx")
+    assert tree.exists()
+    assert store.read(tmp_path)["workers"]["cx"].get("worker") != "retired"
+
+
+def test_retire_refuses_when_session_liveness_cannot_be_read(tmp_path):
+    plan, _, tree, world = paneless_session_worker(tmp_path, None)
+    with pytest.raises(engine.EngineError, match="cannot tell"):
+        engine.worker_retire(plan, tmp_path, world, "cx")
+    assert tree.exists()
+
+
+def test_retire_removes_the_tree_once_the_session_has_ended(tmp_path):
+    plan, _, tree, world = paneless_session_worker(tmp_path, set())
+    engine.worker_retire(plan, tmp_path, world, "cx")
+    assert not tree.exists()
+
+
+def test_retire_refuses_while_a_process_works_inside_the_tree(tmp_path):
+    plan, _, tree, _ = paneless_session_worker(tmp_path, set())
+    shell = procs_mod.Proc(pid=4242, ppid=1, cwd=str(tree / "src"), cpu=0, start=1, cmd="bash")
+    world = engine.World(now=lambda: NOW, coord=BoardCoord(set()), scan=lambda: [shell])
+    with pytest.raises(engine.EngineError, match="4242"):
+        engine.worker_retire(plan, tmp_path, world, "cx")
+    assert tree.exists()
+
+
+def test_retire_refuses_a_tree_holding_ignored_work(tmp_path):
+    plan, repo, tree = setup_worker(tmp_path)
+    (repo / ".gitignore").write_text(".ignored/\n__pycache__/\n")
+    git("-C", str(repo), "add", ".gitignore")
+    git("-C", str(repo), "commit", "-q", "-m", "ignore")
+    git("-C", str(tree), "merge", "-q", "--ff-only", "main")
+    (tree / ".ignored").mkdir()
+    (tree / ".ignored" / "review-synthesis.md").write_text("ten dollars of review")
+    with pytest.raises(engine.EngineError, match="review-synthesis.md"):
+        engine.worker_retire(plan, tmp_path, engine.World(now=lambda: NOW,
+                                                          pane_exists=lambda p: False), "cx")
+    assert (tree / ".ignored" / "review-synthesis.md").exists()
+
+
+def test_retire_still_removes_regenerable_caches(tmp_path):
+    plan, repo, tree = setup_worker(tmp_path)
+    (repo / ".gitignore").write_text("__pycache__/\n")
+    git("-C", str(repo), "add", ".gitignore")
+    git("-C", str(repo), "commit", "-q", "-m", "ignore")
+    git("-C", str(tree), "merge", "-q", "--ff-only", "main")
+    (tree / "pkg" / "__pycache__").mkdir(parents=True)
+    (tree / "pkg" / "__pycache__" / "m.cpython-312.pyc").write_bytes(b"\0")
+    engine.worker_retire(plan, tmp_path, engine.World(now=lambda: NOW,
+                                                      pane_exists=lambda p: False), "cx")
+    assert not tree.exists()

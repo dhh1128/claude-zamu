@@ -1374,6 +1374,17 @@ def worker_add(plan_dir: Path, world: World, wid: str, engine: str, session: str
     return f"worker {wid} ({engine}) registered; liveness from {proofs or 'reports only'}"
 
 
+_REGENERABLE = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis",
+                "node_modules", ".venv", "venv", ".tox", ".nox", ".zamu", ".DS_Store"}
+
+
+def _regenerable(path: str) -> bool:
+    """An ignored path that a build or zamu itself recreates, so losing it costs nothing."""
+    parts = [x for x in path.rstrip("/").split("/") if x]
+    return (any(x in _REGENERABLE or x.endswith(".egg-info") for x in parts)
+            or path.endswith((".pyc", ".pyo")))
+
+
 def worker_retire(plan: Plan, plan_dir: Path, world: World, wid: str) -> str:
     """Close an idle worker's pane and clean linked worktree, keeping its branch and record."""
     def run(argv: list[str]) -> tuple[int, str, str]:
@@ -1412,10 +1423,43 @@ def worker_retire(plan: Plan, plan_dir: Path, world: World, wid: str) -> str:
                 raise EngineError(f"cannot inspect worker {wid}'s tree: {err.strip()}")
             if out.strip():
                 raise EngineError(f"worker {wid}'s worktree is dirty; commit or clean it before retiring.")
+            # `git worktree remove` deletes ignored files without asking, and `status` above
+            # does not list them. On 2026-11-05 that took a review synthesis and its reports
+            # out of a "clean" tree's `.ignored/`. Caches a build regenerates are fine to lose.
+            rc, out, err = run(["git", "-C", tree, "status", "--porcelain", "--ignored",
+                                "--untracked-files=all"])
+            if rc != 0:
+                raise EngineError(f"cannot inspect worker {wid}'s tree: {err.strip()}")
+            kept = [line[3:] for line in out.splitlines()
+                    if line.startswith("!! ") and not _regenerable(line[3:])]
+            if kept:
+                shown = ", ".join(kept[:5]) + (f" and {len(kept) - 5} more" if len(kept) > 5 else "")
+                raise EngineError(f"worker {wid}'s worktree holds ignored files that removing it "
+                                  f"would delete: {shown}. Move them out or delete them, then retire.")
         pane = w.get("pane", "")
+        identity = (w.get("token") if w.get("ours") else "") or w.get("session", "")
+        owned = world.pane_has_session(pane, identity) if pane and identity else None
+        if tree and Path(tree).exists() and owned is not True:
+            # Closing a proven window ends the session in it. Without that, nothing here would
+            # end a session still working in the tree, so removing the tree pulls the floor from
+            # under it -- a PM that registered itself as its own worker did exactly this.
+            sid = w.get("session", "")
+            if sid:
+                live = world.coord.live_sessions(repo or main)
+                if live is None:
+                    raise EngineError(f"cannot tell whether worker {wid}'s session {sid[:8]} is still "
+                                      "running (session-coord's board did not answer); not removing "
+                                      "its worktree.")
+                if sid in live:
+                    raise EngineError(f"worker {wid}'s session {sid[:8]} is still running; end it, or "
+                                      "move it out of the worktree, before retiring.")
+            inside = [p for p in (world.scan() or [])
+                      if procs_mod.under(p.path, str(Path(tree).resolve()))]
+            if inside:
+                pids = ", ".join(f"{p.pid} ({p.cmd.split()[0] if p.cmd else '?'})" for p in inside[:5])
+                raise EngineError(f"processes are working inside worker {wid}'s worktree: {pids}; "
+                                  "end them or move them out before retiring.")
         if pane:
-            identity = (w.get("token") if w.get("ours") else "") or w.get("session", "")
-            owned = world.pane_has_session(pane, identity) if identity else None
             if owned is True:
                 rc, out, err = run(["tmux", "kill-window", "-t", pane])
                 if rc != 0:
